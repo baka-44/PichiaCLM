@@ -1,0 +1,4 @@
+,Enc hidden size,Enc Embedding size,Dec Embedding size,Dense Layer size,Drop rate
+0,511.0,141.0,143.0,198.0,0.8
+1,464.0,243.0,76.0,42.0,0.0
+2,491.0,184.0,51.0,37.0,0.6
