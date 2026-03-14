@@ -1,0 +1,25 @@
+# Python environment
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+.env
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Trained model artefacts (too large for git – store in Google Drive)
+checkpoints/
+saved_models/
+*.ckpt
+*.ckpt.*
+*.h5
+*.keras
+*.pkl
+
+# Data outputs
+*.xlsx
+notebooks/PredictedSequences/
+
+# macOS
+.DS_Store
