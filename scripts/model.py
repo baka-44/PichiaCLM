@@ -95,7 +95,7 @@ def build_training_model(hp: dict = None) -> Model:
     embedding = encod_emb(input_sequence)
 
     encoder = Bidirectional(
-        GRU(hidden, return_sequences=True, return_state=True, implementation=1),
+        GRU(hidden, return_sequences=True, return_state=True, reset_after=False),
         merge_mode='concat', name='bidir_gru_encoder'
     )
     encoder_sequence, encoder_final_f, encoder_final_b = encoder(embedding)
@@ -113,7 +113,7 @@ def build_training_model(hp: dict = None) -> Model:
     final_dex = dex(decoder_inputs)
 
     decoder = GRU(2 * hidden, return_sequences=True, return_state=True,
-                  implementation=1, name='gru_decoder_codon')
+                  reset_after=False, name='gru_decoder_codon')
     decoder_sequence, _ = decoder(final_dex, initial_state=encoder_final)
 
     attn_layer = Attention(name='attention_codon')
@@ -140,7 +140,7 @@ def build_training_model(hp: dict = None) -> Model:
     final_dex_aa = encod_emb(decoder_inputs_aa)
 
     decoder_aa = GRU(2 * hidden, return_sequences=True, return_state=True,
-                     implementation=1, name='gru_decoder_aa')
+                     reset_after=False, name='gru_decoder_aa')
     decoder_sequence_aa, _ = decoder_aa(final_dex_aa, initial_state=encoder_final)
 
     attn_layer_aa = Attention(name='attention_aa')
