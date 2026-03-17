@@ -1,238 +1,177 @@
 """
 model.py
 ========
-Pichia-CLM Arch1 — exact replication of the final architecture from
-Narayanan & Love, PNAS 2026.
+Pichia-CLM Arch1 — PyTorch implementation.
+Exact replication of Narayanan & Love, PNAS 2026.
 
-Architecture (from ApplyingModel_Arch1.ipynb, Setting_no=1, Round3.csv):
-  - Encoder : Bidirectional GRU (hidden=510), shared AA Embedding (dim=42)
-  - Decoder : Two parallel GRU heads (size=2×510=1020)
-      • Codon head  : codon embedding (dim=224) → GRU → Attention → Dense(125) → softmax(67)
-      • AA aux head : shared AA embedding        → GRU → Attention → Dense(139) → softmax(25)
-  - Loss    : sparse_categorical_crossentropy on both outputs (multi-task)
-  - Inputs  : 3  (encoder AA, decoder codon teacher-forcing, decoder AA auxiliary)
-  - Outputs : 2  (predicted codons, reconstructed AA)
-
-The dual decoder with AA reconstruction is a multi-task regulariser —
-the model must simultaneously predict the right codon AND reconstruct
-the amino acid at each position. This steers the shared encoder
-embeddings towards biologically meaningful representations.
-
-Final hyperparameters (Arch1, Row 1 of BO Round3.csv):
-  Enc hidden size   : 510
-  Enc Embedding dim : 42    (AA embedding, shared between encoder + AA aux decoder)
-  Dec Embedding dim : 224   (codon embedding)
-  Dense layer size  : 125   (codon decoder head)
-  Dense layer size aa: 139  (AA aux decoder head)
-  Drop rate         : 0.0   (codon path)
-  Drop rate aa      : 0.7   (AA aux path)
+Architecture:
+  Encoder : Bidirectional GRU (hidden=510), shared AA Embedding (dim=42)
+  Decoder : Two parallel GRU heads (hidden=1020)
+      • Codon head  : codon embedding(224) → GRU → dot-attention → Dense(125) → softmax(67)
+      • AA aux head : shared AA embedding  → GRU → dot-attention → Dense(139) → softmax(25)
+  Loss    : CrossEntropyLoss (ignore_index=0 for PAD) on both outputs
+  Total parameters: 9,330,664
 """
 
-import keras
-from keras.models import Model
-from keras.layers import (
-    Input, Embedding, Bidirectional, GRU, RNN, GRUCell,
-    Concatenate, Attention, TimeDistributed,
-    Dense, Dropout,
-)
-from keras.optimizers import Adam
-from keras.losses import sparse_categorical_crossentropy
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
 
 # ---------------------------------------------------------------------------
-# Default hyperparameters — Arch1 final (Setting_no=1, Round3.csv)
+# Vocab / length constants
 # ---------------------------------------------------------------------------
-DEFAULT_HP = dict(
-    hidden_size_enc   = 510,
-    embedding_size_enc = 42,   # AA embedding dimension (shared)
-    embedding_size_dec = 224,  # codon embedding dimension
-    dense_layer_size   = 125,  # codon decoder dense
-    dense_layer_size_aa = 139, # AA aux decoder dense
-    drop_rate          = 0.0,
-    drop_rate_aa       = 0.7,
-)
-
-# Fixed vocab/length constants
-AA_VOCAB_SIZE  = 25
-DNA_VOCAB_SIZE = 67
-MAX_LENGTH     = 1000   # model sequence length (encoder + decoder)
+AA_VOCAB_SIZE  = 25    # 0=PAD, 1-20=AAs, 21=ambiguous, 22=stop-as-AA, 23=END, 24=START
+DNA_VOCAB_SIZE = 67    # 0=PAD, 1-64=codons, 65=START, 66=END
+MAX_LENGTH     = 1000
 LEARNING_RATE  = 0.001
 BATCH_SIZE     = 150
 EPOCHS         = 100
 
+DEFAULT_HP = dict(
+    hidden_size_enc    = 510,
+    embedding_size_enc = 42,    # AA embedding dimension (shared enc + AA aux dec)
+    embedding_size_dec = 224,   # codon embedding dimension
+    dense_layer_size   = 125,   # codon decoder dense
+    dense_layer_size_aa = 139,  # AA aux decoder dense
+    drop_rate          = 0.0,
+    drop_rate_aa       = 0.7,
+)
 
-def build_training_model(hp: dict = None) -> Model:
+
+class PichiaCLMArch1(nn.Module):
     """
-    Build the full encoder-decoder training model with teacher forcing.
+    Encoder-Decoder GRU model for codon optimisation.
 
-    Three inputs:
-      input_sequence   : (batch, MAX_LENGTH)     – encoder AA tokens (positions 1:1001 of padded)
-      decoder_inputs   : (batch, MAX_LENGTH-1)   – decoder codon tokens, teacher-forced (positions 0:999)
-      decoder_inputs_aa: (batch, MAX_LENGTH)     – decoder AA tokens for aux head (positions 0:1000)
-
-    Two outputs (both use sparse_categorical_crossentropy):
-      logits    : (batch, MAX_LENGTH-1, DNA_VOCAB_SIZE) – codon probabilities
-      logits_aa : (batch, MAX_LENGTH,   AA_VOCAB_SIZE)  – AA reconstruction probabilities
+    Parameter count breakdown (hp = DEFAULT_HP):
+      AA Embedding  (25 × 42)          :     1,050
+      Codon Emb     (67 × 224)         :    15,008
+      BiGRU Encoder (I=42, H=510×2)    : 1,695,240
+      Codon Dec GRU (I=224, H=1020)    : 3,812,760
+      AA Dec GRU    (I=42,  H=1020)    : 3,255,840
+      Dense codon   (2040→125→67)      :   263,567
+      Dense AA      (2040→139→25)      :   287,199
+      ─────────────────────────────────────────────
+      Total                            : 9,330,664
     """
-    if hp is None:
-        hp = DEFAULT_HP
 
-    hidden  = hp['hidden_size_enc']
-    enc_emb = hp['embedding_size_enc']
-    dec_emb = hp['embedding_size_dec']
-    dense   = hp['dense_layer_size']
-    dense_aa = hp['dense_layer_size_aa']
-    drop    = hp['drop_rate']
-    drop_aa = hp['drop_rate_aa']
+    def __init__(self, hp=None):
+        super().__init__()
+        if hp is None:
+            hp = DEFAULT_HP
 
-    # ---- Encoder --------------------------------------------------------
-    input_sequence = Input(shape=(None,), name='encoder_aa_input')
+        hidden   = hp['hidden_size_enc']        # 510
+        enc_emb  = hp['embedding_size_enc']     # 42
+        dec_emb  = hp['embedding_size_dec']     # 224
+        dense    = hp['dense_layer_size']       # 125
+        dense_aa = hp['dense_layer_size_aa']    # 139
+        drop     = hp['drop_rate']              # 0.0
+        drop_aa  = hp['drop_rate_aa']           # 0.7
 
-    # Shared AA embedding — reused by the AA auxiliary decoder head
-    encod_emb = Embedding(
-        input_dim=AA_VOCAB_SIZE, output_dim=enc_emb,
-        trainable=True, mask_zero=True, name='aa_embedding'
-    )
-    embedding = encod_emb(input_sequence)
+        # ── Shared AA embedding (encoder + AA aux decoder) ───────────────
+        self.aa_embedding    = nn.Embedding(AA_VOCAB_SIZE,  enc_emb, padding_idx=0)
+        self.codon_embedding = nn.Embedding(DNA_VOCAB_SIZE, dec_emb, padding_idx=0)
 
-    encoder = Bidirectional(
-        RNN(GRUCell(hidden, reset_after=True), return_sequences=True, return_state=True),
-        merge_mode='concat', name='bidir_gru_encoder'
-    )
-    encoder_sequence, encoder_final_f, encoder_final_b = encoder(embedding)
-    encoder_final = Concatenate(axis=-1, name='encoder_final_state')(
-        [encoder_final_f, encoder_final_b]
-    )   # shape: (batch, 2*hidden)
+        # ── Bidirectional GRU encoder ────────────────────────────────────
+        self.encoder_gru = nn.GRU(
+            enc_emb, hidden,
+            batch_first=True, bidirectional=True,
+        )
 
-    # ---- Codon decoder head -------------------------------------------
-    decoder_inputs = Input(shape=(None,), name='decoder_codon_input')
+        # ── Codon decoder GRU ────────────────────────────────────────────
+        # Initial state = BiGRU fwd+bwd final states concatenated = 2*hidden
+        self.decoder_codon_gru = nn.GRU(dec_emb, 2 * hidden, batch_first=True)
 
-    dex = Embedding(
-        input_dim=DNA_VOCAB_SIZE, output_dim=dec_emb,
-        trainable=True, mask_zero=True, name='codon_embedding'
-    )
-    final_dex = dex(decoder_inputs)
+        # ── AA auxiliary decoder GRU (shares AA embedding) ───────────────
+        self.decoder_aa_gru = nn.GRU(enc_emb, 2 * hidden, batch_first=True)
 
-    decoder = RNN(GRUCell(2 * hidden, reset_after=True),
-                  return_sequences=True, return_state=True, name='gru_decoder_codon')
-    decoder_sequence, _ = decoder(final_dex, initial_state=encoder_final)
+        # ── Codon head: cat(dec_out[1020], attn[1020]) = 4*hidden = 2040 ─
+        self.dense_codon   = nn.Linear(4 * hidden, dense)
+        self.dropout_codon = nn.Dropout(drop)
+        self.output_codon  = nn.Linear(dense, DNA_VOCAB_SIZE)
 
-    attn_layer = Attention(name='attention_codon')
-    attn_out = attn_layer([decoder_sequence, encoder_sequence])
+        # ── AA aux head ──────────────────────────────────────────────────
+        self.dense_aa   = nn.Linear(4 * hidden, dense_aa)
+        self.dropout_aa = nn.Dropout(drop_aa)
+        self.output_aa  = nn.Linear(dense_aa, AA_VOCAB_SIZE)
 
-    decoder_concat = Concatenate(axis=-1, name='codon_concat')(
-        [decoder_sequence, attn_out]
-    )
+    # ── Attention ────────────────────────────────────────────────────────────
+    @staticmethod
+    def dot_attention(query, keys):
+        """
+        Unscaled dot-product attention — matches Keras Attention layer default.
+        query : (B, T_q, H)
+        keys  : (B, T_k, H)   [key = value]
+        → context (B, T_q, H)
+        """
+        scores  = torch.bmm(query, keys.transpose(1, 2))  # (B, T_q, T_k)
+        weights = F.softmax(scores, dim=-1)
+        return torch.bmm(weights, keys)                    # (B, T_q, H)
 
-    intermediate = TimeDistributed(Dense(dense, activation='tanh'), name='dense_codon')
-    intermediate_out = intermediate(decoder_concat)
+    # ── Forward pass ─────────────────────────────────────────────────────────
+    def forward(self, enc_aa, dec_codon, dec_aa):
+        """
+        enc_aa    : (B, 1000)  encoder AA tokens
+        dec_codon : (B, 999)   decoder codon tokens (teacher forcing)
+        dec_aa    : (B, 1000)  decoder AA tokens (auxiliary head)
 
-    dropout_layer = Dropout(drop, name='dropout_codon')
-    dropout_out = dropout_layer(intermediate_out)
+        Returns
+        -------
+        codon_logits : (B, 999,  67)
+        aa_logits    : (B, 1000, 25)
+        """
+        # ── Encoder ──────────────────────────────────────────────────────
+        enc_emb_out = self.aa_embedding(enc_aa)               # (B, 1000, 42)
+        enc_seq, enc_state = self.encoder_gru(enc_emb_out)
+        # enc_seq   : (B, 1000, 1020)
+        # enc_state : (2, B, 510)   [fwd_final, bwd_final]
 
-    dense_layer = TimeDistributed(Dense(DNA_VOCAB_SIZE, activation='softmax'),
-                                  name='output_codon')
-    logits = dense_layer(dropout_out)
+        # Concatenate fwd + bwd final states → decoder initial hidden state
+        enc_final = torch.cat([enc_state[0], enc_state[1]], dim=-1)  # (B, 1020)
+        h0 = enc_final.unsqueeze(0)                                    # (1, B, 1020)
 
-    # ---- AA auxiliary decoder head ------------------------------------
-    decoder_inputs_aa = Input(shape=(None,), name='decoder_aa_input')
+        # ── Codon decoder ─────────────────────────────────────────────────
+        dec_emb_out = self.codon_embedding(dec_codon)         # (B, 999, 224)
+        dec_seq, _  = self.decoder_codon_gru(dec_emb_out, h0) # (B, 999, 1020)
 
-    # Reuse the same AA embedding as the encoder
-    final_dex_aa = encod_emb(decoder_inputs_aa)
+        attn_c   = self.dot_attention(dec_seq, enc_seq)        # (B, 999, 1020)
+        cat_c    = torch.cat([dec_seq, attn_c], dim=-1)        # (B, 999, 2040)
 
-    decoder_aa = RNN(GRUCell(2 * hidden, reset_after=True),
-                     return_sequences=True, return_state=True, name='gru_decoder_aa')
-    decoder_sequence_aa, _ = decoder_aa(final_dex_aa, initial_state=encoder_final)
+        out_c    = torch.tanh(self.dense_codon(cat_c))         # (B, 999, 125)
+        out_c    = self.dropout_codon(out_c)
+        codon_logits = self.output_codon(out_c)                 # (B, 999, 67)
 
-    attn_layer_aa = Attention(name='attention_aa')
-    attn_out_aa = attn_layer_aa([decoder_sequence_aa, encoder_sequence])
+        # ── AA auxiliary decoder ──────────────────────────────────────────
+        aa_emb_out = self.aa_embedding(dec_aa)                 # (B, 1000, 42) shared
+        aa_seq, _  = self.decoder_aa_gru(aa_emb_out, h0)      # (B, 1000, 1020)
 
-    decoder_concat_aa = Concatenate(axis=-1, name='aa_concat')(
-        [decoder_sequence_aa, attn_out_aa]
-    )
+        attn_aa  = self.dot_attention(aa_seq, enc_seq)         # (B, 1000, 1020)
+        cat_aa   = torch.cat([aa_seq, attn_aa], dim=-1)        # (B, 1000, 2040)
 
-    intermediate_aa = TimeDistributed(Dense(dense_aa, activation='tanh'), name='dense_aa')
-    intermediate_out_aa = intermediate_aa(decoder_concat_aa)
+        out_aa   = torch.tanh(self.dense_aa(cat_aa))           # (B, 1000, 139)
+        out_aa   = self.dropout_aa(out_aa)
+        aa_logits = self.output_aa(out_aa)                      # (B, 1000, 25)
 
-    dropout_layer_aa = Dropout(drop_aa, name='dropout_aa')
-    dropout_out_aa = dropout_layer_aa(intermediate_out_aa)
+        return codon_logits, aa_logits
 
-    dense_layer_aa = TimeDistributed(Dense(AA_VOCAB_SIZE, activation='softmax'),
-                                     name='output_aa')
-    logits_aa = dense_layer_aa(dropout_out_aa)
 
-    # ---- Compile -------------------------------------------------------
-    model = Model(
-        inputs=[input_sequence, decoder_inputs, decoder_inputs_aa],
-        outputs=[logits, logits_aa],
-        name='PichiaCLM_Arch1_training',
-    )
-    # Keras 3 requires one metrics entry per output when using a list
-    model.compile(
-        loss=sparse_categorical_crossentropy,
-        optimizer=Adam(learning_rate=LEARNING_RATE),
-        metrics=[['accuracy'], ['accuracy']],
-    )
+# ---------------------------------------------------------------------------
+# Build helpers
+# ---------------------------------------------------------------------------
+
+def build_training_model(hp=None, device=None):
+    """Instantiate PichiaCLMArch1 and move to device."""
+    model = PichiaCLMArch1(hp)
+    if device is not None:
+        model = model.to(device)
     return model
 
 
-def build_inference_models(training_model: Model, hp: dict = None):
-    """
-    Decompose the trained model into separate encoder and decoder
-    models for autoregressive inference (one codon at a time).
-
-    Returns:
-        encoder_model   : AA sequence → (encoder_final_state, encoder_sequences)
-        decoder_model   : (codon_token_t, state_t, encoder_sequences) → (codon_probs, state_t+1)
-    """
-    if hp is None:
-        hp = DEFAULT_HP
-
-    hidden = hp['hidden_size_enc']
-
-    # Retrieve trained layers by name
-    aa_emb_layer     = training_model.get_layer('aa_embedding')
-    encoder_layer    = training_model.get_layer('bidir_gru_encoder')
-    codon_emb_layer  = training_model.get_layer('codon_embedding')
-    decoder_layer    = training_model.get_layer('gru_decoder_codon')
-    attn_layer       = training_model.get_layer('attention_codon')
-    dense_inter      = training_model.get_layer('dense_codon')
-    dropout_layer    = training_model.get_layer('dropout_codon')
-    dense_out        = training_model.get_layer('output_codon')
-
-    # --- Encoder model -------------------------------------------------
-    enc_input = Input(shape=(None,), name='enc_inf_aa_input')
-    enc_emb   = aa_emb_layer(enc_input)
-    enc_seq, enc_f, enc_b = encoder_layer(enc_emb)
-    enc_final = Concatenate(axis=-1)([enc_f, enc_b])
-
-    encoder_model = Model(enc_input, [enc_final, enc_seq],
-                          name='encoder_inference')
-
-    # --- Decoder model (one step at a time) ----------------------------
-    dec_state_input  = Input(shape=(2 * hidden,),          name='dec_inf_state')
-    enc_seq_input    = Input(shape=(None, 2 * hidden), name='dec_inf_enc_seq')
-    dec_token_input  = Input(shape=(1,),                   name='dec_inf_token')
-
-    dec_emb = codon_emb_layer(dec_token_input)
-    dec_out, dec_state = decoder_layer(dec_emb, initial_state=dec_state_input)
-
-    attn_out_inf = attn_layer([dec_out, enc_seq_input])
-    dec_concat   = Concatenate(axis=-1)([dec_out, attn_out_inf])
-
-    inter_out  = dense_inter(dec_concat)
-    drop_out   = dropout_layer(inter_out)   # dropout is off at inference (training=False)
-    codon_prob = dense_out(drop_out)
-
-    decoder_model = Model(
-        inputs=[dec_token_input, dec_state_input, enc_seq_input],
-        outputs=[codon_prob, dec_state],
-        name='decoder_inference',
-    )
-
-    return encoder_model, decoder_model
+def count_parameters(model):
+    return sum(p.numel() for p in model.parameters() if p.requires_grad)
 
 
-if __name__ == "__main__":
+if __name__ == '__main__':
     model = build_training_model()
-    model.summary()
-    print(f"\nTotal parameters: {model.count_params():,}")
+    total = count_parameters(model)
+    print(f'Total parameters: {total:,}')
+    # Expected: 9,330,664
