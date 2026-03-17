@@ -58,18 +58,16 @@ def parse_args():
 # Input / target slicing  (replicates original paper's teacher-forcing setup)
 # ---------------------------------------------------------------------------
 
-def make_dataset(AA, Cds, batch_size, shuffle=False, seed=42):
-    """Build a tf.data.Dataset from fixed-length padded arrays.
-    All sequences padded to MAX_LENGTH — no padded_batch needed.
+def make_dataset(AA, Cds, batch_size=None, shuffle=False, seed=42):
+    """Return (inputs, targets) as numpy arrays — no tf.data pipeline.
+    Passed directly to model.fit / model.evaluate.
     """
-    inputs, targets = make_inputs_targets(AA, Cds)
-    ds = tf.data.Dataset.from_tensor_slices((
-        tuple(inp.astype(np.int32) for inp in inputs),
-        tuple(tgt.astype(np.int32) for tgt in targets),
-    ))
     if shuffle:
-        ds = ds.shuffle(buffer_size=len(AA), seed=seed, reshuffle_each_iteration=True)
-    return ds.batch(batch_size).prefetch(tf.data.AUTOTUNE)
+        rng = np.random.default_rng(seed)
+        idx = rng.permutation(len(AA))
+        AA, Cds = AA[idx], Cds[idx]
+    inputs, targets = make_inputs_targets(AA, Cds)
+    return inputs, targets
 
 
 def make_inputs_targets(AA_tr, Cds_tr, max_length=MAX_LENGTH):
