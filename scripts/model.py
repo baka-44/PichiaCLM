@@ -31,7 +31,7 @@ Final hyperparameters (Arch1, Row 1 of BO Round3.csv):
 import tensorflow as tf
 from tensorflow.keras.models import Model
 from tensorflow.keras.layers import (
-    Input, Embedding, Bidirectional, GRU,
+    Input, Embedding, Bidirectional, GRU, RNN, GRUCell,
     Concatenate, Attention, TimeDistributed,
     Dense, Dropout,
 )
@@ -95,7 +95,7 @@ def build_training_model(hp: dict = None) -> Model:
     embedding = encod_emb(input_sequence)
 
     encoder = Bidirectional(
-        GRU(hidden, return_sequences=True, return_state=True, reset_after=False),
+        RNN(GRUCell(hidden, reset_after=True), return_sequences=True, return_state=True),
         merge_mode='concat', name='bidir_gru_encoder'
     )
     encoder_sequence, encoder_final_f, encoder_final_b = encoder(embedding)
@@ -112,8 +112,8 @@ def build_training_model(hp: dict = None) -> Model:
     )
     final_dex = dex(decoder_inputs)
 
-    decoder = GRU(2 * hidden, return_sequences=True, return_state=True,
-                  reset_after=False, name='gru_decoder_codon')
+    decoder = RNN(GRUCell(2 * hidden, reset_after=True),
+                  return_sequences=True, return_state=True, name='gru_decoder_codon')
     decoder_sequence, _ = decoder(final_dex, initial_state=encoder_final)
 
     attn_layer = Attention(name='attention_codon')
@@ -139,8 +139,8 @@ def build_training_model(hp: dict = None) -> Model:
     # Reuse the same AA embedding as the encoder
     final_dex_aa = encod_emb(decoder_inputs_aa)
 
-    decoder_aa = GRU(2 * hidden, return_sequences=True, return_state=True,
-                     reset_after=False, name='gru_decoder_aa')
+    decoder_aa = RNN(GRUCell(2 * hidden, reset_after=True),
+                     return_sequences=True, return_state=True, name='gru_decoder_aa')
     decoder_sequence_aa, _ = decoder_aa(final_dex_aa, initial_state=encoder_final)
 
     attn_layer_aa = Attention(name='attention_aa')
