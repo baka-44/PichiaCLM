@@ -171,6 +171,7 @@ def build_training_model(hp: dict = None) -> Model:
         loss=sparse_categorical_crossentropy,
         optimizer=Adam(learning_rate=LEARNING_RATE),
         metrics=[['accuracy'], ['accuracy']],
+        jit_compile=True,   # XLA: compiles training step to GPU kernels, bypasses cuDNN GRU bug
     )
     return model
 
