@@ -28,14 +28,14 @@ Final hyperparameters (Arch1, Row 1 of BO Round3.csv):
   Drop rate aa      : 0.7   (AA aux path)
 """
 
-import tensorflow as tf
-from tensorflow.keras.models import Model
-from tensorflow.keras.layers import (
+import keras
+from keras.models import Model
+from keras.layers import (
     Input, Embedding, Bidirectional, GRU, RNN, GRUCell,
     Concatenate, Attention, TimeDistributed,
     Dense, Dropout,
 )
-from tensorflow.keras.optimizers import Adam
+from keras.optimizers import Adam
 from keras.losses import sparse_categorical_crossentropy
 
 # ---------------------------------------------------------------------------
@@ -171,7 +171,6 @@ def build_training_model(hp: dict = None) -> Model:
         loss=sparse_categorical_crossentropy,
         optimizer=Adam(learning_rate=LEARNING_RATE),
         metrics=[['accuracy'], ['accuracy']],
-        jit_compile=True,   # XLA: compiles training step to GPU kernels, bypasses cuDNN GRU bug
     )
     return model
 

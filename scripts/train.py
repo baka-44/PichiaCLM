@@ -22,7 +22,7 @@ import os
 import json
 import numpy as np
 import pandas as pd
-import tensorflow as tf
+import keras
 
 # Local modules
 import sys
@@ -97,7 +97,7 @@ def make_inputs_targets(AA_tr, Cds_tr, max_length=MAX_LENGTH):
 # ---------------------------------------------------------------------------
 
 def train(args):
-    tf.random.set_seed(args.seed)
+    keras.utils.set_random_seed(args.seed)
     np.random.seed(args.seed)
 
     # --- Data -----------------------------------------------------------
@@ -125,18 +125,18 @@ def train(args):
     ckpt_path = os.path.join(args.checkpoint_dir, "pichia_clm_arch1_ep{epoch:03d}.weights.h5")
 
     callbacks = [
-        tf.keras.callbacks.ModelCheckpoint(
+        keras.callbacks.ModelCheckpoint(
             filepath=ckpt_path,
             save_weights_only=True,
             verbose=1,
         ),
-        tf.keras.callbacks.EarlyStopping(
+        keras.callbacks.EarlyStopping(
             monitor="val_loss",
             patience=args.patience,
             restore_best_weights=True,
             verbose=1,
         ),
-        tf.keras.callbacks.CSVLogger(
+        keras.callbacks.CSVLogger(
             os.path.join(args.checkpoint_dir, "training_history.csv"),
             append=True,
         ),
