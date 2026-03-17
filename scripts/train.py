@@ -119,7 +119,6 @@ def make_dataset(AA, Cds, batch_size, shuffle=False, seed=42):
 
     ds = ds.padded_batch(
         batch_size,
-        padded_shapes=(([None], [None], [None]), ([None], [None])),
         padding_values=((np.int32(0), np.int32(0), np.int32(0)),
                         (np.int32(0), np.int32(0))),
     )
