@@ -58,6 +58,74 @@ def parse_args():
 # Input / target slicing  (replicates original paper's teacher-forcing setup)
 # ---------------------------------------------------------------------------
 
+def _strip_sequence(seq, end_token, inclusive):
+    """Strip a padded 1-D integer array at its END token.
+
+    inclusive=True  → keep the END token   (use for targets)
+    inclusive=False → stop before END token (use for decoder inputs)
+    Falls back to stripping trailing zeros when no END token is found.
+    """
+    end_positions = np.where(seq == end_token)[0]
+    if len(end_positions) > 0:
+        pos = int(end_positions[0])
+        return seq[:pos + 1] if inclusive else seq[:pos]
+    nz = np.where(seq != 0)[0]
+    return seq[:int(nz[-1]) + 1] if len(nz) > 0 else seq[:1]
+
+
+def make_dataset(AA, Cds, batch_size, shuffle=False, seed=42):
+    """Build a tf.data.Dataset with per-batch dynamic padding.
+
+    Each batch is padded only to the longest sequence it contains,
+    rather than the global MAX_LENGTH=1000.  Average K. phaffii protein
+    is ~350 AAs, so typical batches are ~400 tokens wide instead of 1000,
+    giving roughly a 2–3x speedup when training with the standard GRU.
+
+    Slicing / teacher-forcing logic mirrors make_inputs_targets exactly.
+    """
+    n = len(AA)
+
+    enc_aa_pad    = AA[:,  1 : MAX_LENGTH + 1]   # [aa1..aaN, END=23]   strip incl END
+    dec_codon_pad = Cds[:, 0 : MAX_LENGTH - 1]   # [START, c1..cN]      strip excl END
+    dec_aa_pad    = AA[:,  0 : MAX_LENGTH]        # [START, aa1..aaN]    strip excl END
+    tgt_codon_pad = Cds[:, 1 : MAX_LENGTH]        # [c1..cN, END=66]     strip incl END
+    tgt_aa_pad    = AA[:,  1 : MAX_LENGTH + 1]    # [aa1..aaN, END=23]   strip incl END
+
+    enc_aa_v    = [_strip_sequence(enc_aa_pad[i],    23, inclusive=True)  for i in range(n)]
+    dec_codon_v = [_strip_sequence(dec_codon_pad[i], 66, inclusive=False) for i in range(n)]
+    dec_aa_v    = [_strip_sequence(dec_aa_pad[i],    23, inclusive=False) for i in range(n)]
+    tgt_codon_v = [_strip_sequence(tgt_codon_pad[i], 66, inclusive=True)  for i in range(n)]
+    tgt_aa_v    = [_strip_sequence(tgt_aa_pad[i],    23, inclusive=True)  for i in range(n)]
+
+    def gen():
+        for e, dc, da, tc, ta in zip(enc_aa_v, dec_codon_v, dec_aa_v,
+                                     tgt_codon_v, tgt_aa_v):
+            yield ((e.astype(np.int32), dc.astype(np.int32), da.astype(np.int32)),
+                   (tc.astype(np.int32), ta.astype(np.int32)))
+
+    ds = tf.data.Dataset.from_generator(
+        gen,
+        output_signature=(
+            (tf.TensorSpec(shape=(None,), dtype=tf.int32),
+             tf.TensorSpec(shape=(None,), dtype=tf.int32),
+             tf.TensorSpec(shape=(None,), dtype=tf.int32)),
+            (tf.TensorSpec(shape=(None,), dtype=tf.int32),
+             tf.TensorSpec(shape=(None,), dtype=tf.int32)),
+        ),
+    )
+
+    if shuffle:
+        ds = ds.shuffle(buffer_size=n, seed=seed, reshuffle_each_iteration=True)
+
+    ds = ds.padded_batch(
+        batch_size,
+        padded_shapes=((None, None, None), (None, None)),
+        padding_values=((np.int32(0), np.int32(0), np.int32(0)),
+                        (np.int32(0), np.int32(0))),
+    )
+    return ds.prefetch(tf.data.AUTOTUNE)
+
+
 def make_inputs_targets(AA_tr, Cds_tr, max_length=MAX_LENGTH):
     """
     Slice padded arrays into the three model inputs and two targets.

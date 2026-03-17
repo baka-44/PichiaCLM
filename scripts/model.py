@@ -85,7 +85,7 @@ def build_training_model(hp: dict = None) -> Model:
     drop_aa = hp['drop_rate_aa']
 
     # ---- Encoder --------------------------------------------------------
-    input_sequence = Input(shape=(MAX_LENGTH,), name='encoder_aa_input')
+    input_sequence = Input(shape=(None,), name='encoder_aa_input')
 
     # Shared AA embedding — reused by the AA auxiliary decoder head
     encod_emb = Embedding(
@@ -104,7 +104,7 @@ def build_training_model(hp: dict = None) -> Model:
     )   # shape: (batch, 2*hidden)
 
     # ---- Codon decoder head -------------------------------------------
-    decoder_inputs = Input(shape=(MAX_LENGTH - 1,), name='decoder_codon_input')
+    decoder_inputs = Input(shape=(None,), name='decoder_codon_input')
 
     dex = Embedding(
         input_dim=DNA_VOCAB_SIZE, output_dim=dec_emb,
@@ -134,7 +134,7 @@ def build_training_model(hp: dict = None) -> Model:
     logits = dense_layer(dropout_out)
 
     # ---- AA auxiliary decoder head ------------------------------------
-    decoder_inputs_aa = Input(shape=(MAX_LENGTH,), name='decoder_aa_input')
+    decoder_inputs_aa = Input(shape=(None,), name='decoder_aa_input')
 
     # Reuse the same AA embedding as the encoder
     final_dex_aa = encod_emb(decoder_inputs_aa)
@@ -200,7 +200,7 @@ def build_inference_models(training_model: Model, hp: dict = None):
     dense_out        = training_model.get_layer('output_codon')
 
     # --- Encoder model -------------------------------------------------
-    enc_input = Input(shape=(MAX_LENGTH,), name='enc_inf_aa_input')
+    enc_input = Input(shape=(None,), name='enc_inf_aa_input')
     enc_emb   = aa_emb_layer(enc_input)
     enc_seq, enc_f, enc_b = encoder_layer(enc_emb)
     enc_final = Concatenate(axis=-1)([enc_f, enc_b])
@@ -210,7 +210,7 @@ def build_inference_models(training_model: Model, hp: dict = None):
 
     # --- Decoder model (one step at a time) ----------------------------
     dec_state_input  = Input(shape=(2 * hidden,),          name='dec_inf_state')
-    enc_seq_input    = Input(shape=(MAX_LENGTH, 2 * hidden), name='dec_inf_enc_seq')
+    enc_seq_input    = Input(shape=(None, 2 * hidden), name='dec_inf_enc_seq')
     dec_token_input  = Input(shape=(1,),                   name='dec_inf_token')
 
     dec_emb = codon_emb_layer(dec_token_input)
